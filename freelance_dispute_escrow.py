@@ -6,11 +6,14 @@ FreelanceDisputeEscrow
 Primitive kontrak escrow dua pihak (client & freelancer) dengan resolusi
 sengketa berbasis LLM. Dana ditahan on-chain sampai freelancer menandai
 pekerjaan selesai. Jika client tidak setuju, salah satu pihak bisa membuka
-sengketa; validator GenLayer lalu membaca bukti (deskripsi kerja + tautan
-bukti) dan menghasilkan verdict terstruktur (JSON) yang divalidasi secara
+sengketa; validator GenLayer lalu MENGAMBIL isi kedua bukti (bukan cuma
+URL-nya) dan menghasilkan verdict terstruktur (JSON) yang divalidasi secara
 deterministik sebelum ditulis ke state.
 
 Kenapa ini bukan "thin LLM wrapper":
+- Validator benar-benar fetch konten evidence lewat `gl.nondet.web.render()`
+  di dalam blok non-deterministic, lalu isi konten itu (bukan sekadar URL)
+  yang dikirim ke LLM untuk diadili.
 - Konsensus dipakai lewat `gl.eq_principle.prompt_comparative`, sehingga
   validator boleh menulis alasan dengan kalimat berbeda tapi tetap harus
   sepakat pada payout_split yang sama (keputusan terstruktur, bukan teks bebas).
@@ -86,8 +89,9 @@ class FreelanceDisputeEscrow(gl.Contract):
     @gl.public.write
     def resolve_dispute(self) -> None:
         """
-        Inti dari primitive ini: validator membaca deskripsi kerja + kedua
-        bukti, lalu menghasilkan verdict terstruktur. Konsensus dicapai lewat
+        Inti dari primitive ini: validator MENGAMBIL isi kedua bukti (bukan
+        cuma URL-nya) lalu membaca deskripsi kerja + kedua bukti tersebut,
+        kemudian menghasilkan verdict terstruktur. Konsensus dicapai lewat
         prompt_comparative, tapi hasil akhirnya tetap divalidasi deterministik
         sebelum dipercaya.
         """
@@ -98,16 +102,37 @@ class FreelanceDisputeEscrow(gl.Contract):
         dispute_url = self.dispute_evidence_url
 
         def get_verdict() -> str:
+            # --- Ambil isi bukti sebenarnya, bukan cuma URL-nya ---
+            try:
+                submission_content = gl.nondet.web.render(submission_url, mode="text")
+            except Exception:
+                submission_content = "(gagal mengambil konten - URL tidak dapat diakses)"
+
+            try:
+                dispute_content = gl.nondet.web.render(dispute_url, mode="text")
+            except Exception:
+                dispute_content = "(gagal mengambil konten - URL tidak dapat diakses)"
+
+            # Normalisasi panjang supaya prompt tetap wajar & konsisten
+            # untuk perbandingan antar validator.
+            submission_content = submission_content[:3000]
+            dispute_content = dispute_content[:3000]
+
             prompt = f"""
 Kamu adalah juri netral untuk sengketa kerja freelance.
 
 Deskripsi pekerjaan yang disepakati:
 {work_desc}
 
-Bukti pengerjaan dari freelancer (URL): {submission_url}
-Alasan keberatan dari client (URL): {dispute_url}
+Isi bukti pengerjaan dari freelancer (diambil dari {submission_url}):
+{submission_content}
 
-Baca kedua bukti tersebut lalu putuskan pembagian dana escrow yang adil.
+Isi alasan keberatan dari client (diambil dari {dispute_url}):
+{dispute_content}
+
+Berdasarkan isi bukti di atas (bukan URL-nya), putuskan pembagian dana
+escrow yang adil.
+
 Balas HANYA dengan JSON valid, tanpa teks lain, dengan bentuk persis:
 {{"client_payout_pct": <integer 0-100>, "reason": "<ringkasan singkat alasan>"}}
 """
