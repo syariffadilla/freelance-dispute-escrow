@@ -13,7 +13,7 @@ A GenLayer Intelligent Contract primitive: a two-party escrow (client & freelanc
 
 Deployed on GenLayer Studio (StudioNet):
 
-- Contract address: `0xe2eD731A52bE0c5488F40ffdaDB00e2aCb20FEcA`
+- Contract address: `0x8f54c954c4B900e64Ed67CE56F657aEFfBfF3f00`
 - Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` (pinned, required for Full Consensus mode)
 
 ## End-to-end flow tested
