@@ -2,26 +2,12 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 """
 FreelanceDisputeEscrow
------------------------
-Primitive kontrak escrow dua pihak (client & freelancer) dengan resolusi
-sengketa berbasis LLM. Dana ditahan on-chain sampai freelancer menandai
-pekerjaan selesai. Jika client tidak setuju, salah satu pihak bisa membuka
-sengketa; validator GenLayer lalu MENGAMBIL isi kedua bukti (bukan cuma
-URL-nya) dan menghasilkan verdict terstruktur (JSON) yang divalidasi secara
-deterministik sebelum ditulis ke state.
 
-Kenapa ini bukan "thin LLM wrapper":
-- Validator benar-benar fetch konten evidence lewat `gl.nondet.web.render()`
-  di dalam blok non-deterministic, lalu isi konten itu (bukan sekadar URL)
-  yang dikirim ke LLM untuk diadili.
-- Konsensus dipakai lewat `gl.eq_principle.prompt_comparative`, sehingga
-  validator boleh menulis alasan dengan kalimat berbeda tapi tetap harus
-  sepakat pada payout_split yang sama (keputusan terstruktur, bukan teks bebas).
-- Output LLM WAJIB lolos schema + range check di Python (guard deterministik)
-  sebelum dipercaya -> integritas keputusan ada di kode kontrak, bukan
-  cuma dipercaya mentah dari model.
-- State design eksplisit: enum status, saldo escrow, riwayat bukti,
-  dan deadline auto-release supaya dana tidak macet selamanya.
+Two-party escrow (client & freelancer) with LLM-based dispute resolution.
+Funds are held on-chain until the freelancer marks the work done. If the
+client disagrees, either party can open a dispute; validators then fetch
+both pieces of evidence, read them, and produce a structured verdict that
+is validated deterministically before it's written to state.
 """
 
 from genlayer import *
@@ -45,7 +31,7 @@ class FreelanceDisputeEscrow(gl.Contract):
     submission_evidence_url: str
     dispute_evidence_url: str
     verdict_reason: str
-    client_payout_pct: u256  # 0-100, dipakai saat auto-release juga
+    client_payout_pct: u256
     deadline_ts: u256
 
     def __init__(
@@ -75,7 +61,6 @@ class FreelanceDisputeEscrow(gl.Contract):
 
     @gl.public.write
     def approve_work(self) -> None:
-        # Hanya client yang boleh approve manual (freelancer full payout)
         assert self.status == EscrowStatus.SUBMITTED, "Belum ada submission"
         self.client_payout_pct = 0
         self.status = EscrowStatus.RELEASED
@@ -88,13 +73,6 @@ class FreelanceDisputeEscrow(gl.Contract):
 
     @gl.public.write
     def resolve_dispute(self) -> None:
-        """
-        Inti dari primitive ini: validator MENGAMBIL isi kedua bukti (bukan
-        cuma URL-nya) lalu membaca deskripsi kerja + kedua bukti tersebut,
-        kemudian menghasilkan verdict terstruktur. Konsensus dicapai lewat
-        prompt_comparative, tapi hasil akhirnya tetap divalidasi deterministik
-        sebelum dipercaya.
-        """
         assert self.status == EscrowStatus.DISPUTED, "Tidak ada sengketa aktif"
 
         work_desc = self.work_description
@@ -102,7 +80,6 @@ class FreelanceDisputeEscrow(gl.Contract):
         dispute_url = self.dispute_evidence_url
 
         def get_verdict() -> str:
-            # --- Ambil isi bukti sebenarnya, bukan cuma URL-nya ---
             try:
                 submission_content = gl.nondet.web.render(submission_url, mode="text")
             except Exception:
@@ -113,8 +90,6 @@ class FreelanceDisputeEscrow(gl.Contract):
             except Exception:
                 dispute_content = "(gagal mengambil konten - URL tidak dapat diakses)"
 
-            # Normalisasi panjang supaya prompt tetap wajar & konsisten
-            # untuk perbandingan antar validator.
             submission_content = submission_content[:3000]
             dispute_content = dispute_content[:3000]
 
@@ -139,22 +114,17 @@ Balas HANYA dengan JSON valid, tanpa teks lain, dengan bentuk persis:
             result = gl.nondet.exec_prompt(prompt)
             return result.strip()
 
-        # Semua validator harus sepakat pada payout_split final walau
-        # kalimat "reason" mereka boleh berbeda -> comparative equivalence.
         raw_verdict = gl.eq_principle.prompt_comparative(
             get_verdict,
             "Validator harus sepakat pada nilai client_payout_pct yang sama "
             "walau kalimat alasan (reason) boleh berbeda redaksinya.",
         )
 
-        # --- Guard deterministik: JANGAN percaya LLM mentah-mentah ---
         try:
             parsed = json.loads(raw_verdict)
             pct = int(parsed["client_payout_pct"])
             reason = str(parsed["reason"])[:280]
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-            # Fallback aman: kalau format rusak, anggap tidak konklusif
-            # dan default ke split 50/50 sambil menandai perlu review manusia.
             pct = 50
             reason = "Verdict tidak valid/format rusak - default 50/50, perlu review manual."
 
@@ -169,10 +139,6 @@ Balas HANYA dengan JSON valid, tanpa teks lain, dengan bentuk persis:
 
     @gl.public.write
     def auto_release_after_deadline(self, current_ts: int) -> None:
-        """
-        Kalau melewati deadline dan tidak ada dispute, dana otomatis cair
-        penuh ke freelancer supaya escrow tidak macet selamanya.
-        """
         assert self.status == EscrowStatus.SUBMITTED, "Hanya berlaku saat menunggu approval"
         assert current_ts >= self.deadline_ts, "Belum melewati deadline"
         self.client_payout_pct = 0
